@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import ctypes
+import io
 import os
 import shutil
 import sys
+from pathlib import Path
 from typing import TextIO
 
 import numpy as np
@@ -17,6 +19,7 @@ from .views import activity_grid
 BLOCKS = " ·░▒▓█"
 TOP_HUD = 3  # connectome + stim + status (drawn above the image)
 BOTTOM_HUD = 2  # keys + disclaimer
+CACA_CHARS = " `'.,:;irsXZA2HG#9&@"
 
 
 def _color256(v: float) -> int:
@@ -128,6 +131,116 @@ def top_hud_lines(engine: LivingEngine, frame: FrameState, fps: float, renderer_
     ]
 
 
+def _bind_caca(lib) -> None:
+    lib.caca_create_canvas.restype = ctypes.c_void_p
+    lib.caca_clear_canvas.argtypes = [ctypes.c_void_p]
+    lib.caca_put_char.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint32]
+    lib.caca_put_str.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_char_p]
+    lib.caca_set_color_ansi.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8]
+    lib.caca_get_canvas_width.restype = ctypes.c_int
+    lib.caca_get_canvas_width.argtypes = [ctypes.c_void_p]
+    lib.caca_get_canvas_height.restype = ctypes.c_int
+    lib.caca_get_canvas_height.argtypes = [ctypes.c_void_p]
+    lib.caca_export_canvas_to_memory.restype = ctypes.c_void_p
+    lib.caca_export_canvas_to_memory.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    lib.caca_free_canvas.argtypes = [ctypes.c_void_p]
+    if hasattr(lib, "caca_free"):
+        lib.caca_free.argtypes = [ctypes.c_void_p]
+
+
+def paint_caca_frame(
+    lib,
+    cv,
+    engine: LivingEngine,
+    frame: FrameState,
+    fps: float,
+    renderer_name: str = "living/caca",
+) -> None:
+    """Paint one living frame onto an existing libcaca canvas (black background)."""
+    w = lib.caca_get_canvas_width(cv)
+    h = lib.caca_get_canvas_height(cv)
+    grid_h = max(8, h - TOP_HUD - BOTTOM_HUD)
+    # True black backdrop — never leave stale glyphs / light cells.
+    lib.caca_set_color_ansi(cv, 0x00, 0x00)
+    lib.caca_clear_canvas(cv)
+
+    grid = activity_grid(engine, frame, w, grid_h)
+
+    lib.caca_set_color_ansi(cv, 0x0F, 0x00)  # bright white on black HUD
+    for i, ln in enumerate(top_hud_lines(engine, frame, fps, renderer_name)):
+        padded = (ln[:w] + " " * w)[:w]
+        lib.caca_put_str(cv, 0, i, padded.encode())
+
+    for y in range(grid_h):
+        for x in range(w):
+            v = float(grid[y, x])
+            ch = ord(CACA_CHARS[min(len(CACA_CHARS) - 1, int(v * (len(CACA_CHARS) - 1) + 1e-6))])
+            pair = _caca_ansi_pair(v)
+            fg, bg = pair & 0x0F, (pair >> 4) & 0x0F  # bg nibble is 0 → black
+            if v <= 0.02:
+                fg, bg = 0x00, 0x00  # empty cells stay pure black
+            lib.caca_set_color_ansi(cv, fg, bg)
+            lib.caca_put_char(cv, x, TOP_HUD + y, ch)
+
+    lib.caca_set_color_ansi(cv, 0x0F, 0x00)
+    y0 = TOP_HUD + grid_h
+    lib.caca_put_str(cv, 0, y0, (keys_line()[:w] + " " * w)[:w].encode())
+    lib.caca_put_str(cv, 0, y0 + 1, (disclaimer_line()[:w] + " " * w)[:w].encode())
+
+
+def export_canvas_png(lib, cv, path: Path) -> Path:
+    """Export libcaca canvas via TGA → PNG, composited onto pure black."""
+    from PIL import Image
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nbytes = ctypes.c_size_t()
+    ptr = lib.caca_export_canvas_to_memory(cv, b"tga", ctypes.byref(nbytes))
+    if not ptr or nbytes.value <= 0:
+        raise RuntimeError("caca_export_canvas_to_memory(tga) failed")
+    try:
+        buf = ctypes.string_at(ptr, nbytes.value)
+    finally:
+        if hasattr(lib, "caca_free"):
+            lib.caca_free(ptr)
+    im = Image.open(io.BytesIO(buf))
+    # Force black background (TGA may be RGBA with transparent empty cells).
+    rgb = Image.new("RGB", im.size, (0, 0, 0))
+    if im.mode == "RGBA":
+        rgb.paste(im, mask=im.split()[3])
+    else:
+        rgb.paste(im.convert("RGB"))
+    rgb.save(path, format="PNG")
+    return path
+
+
+def save_living_screenshot(
+    engine: LivingEngine,
+    frame: FrameState,
+    path: Path,
+    *,
+    cols: int = 120,
+    rows: int = 36,
+    fps: float = 12.0,
+) -> Path:
+    """Headless screenshot of the real libcaca living frame (no X server / display)."""
+    lib = ctypes.CDLL("libcaca.so.0")
+    _bind_caca(lib)
+    total_h = rows + TOP_HUD + BOTTOM_HUD
+    cv = lib.caca_create_canvas(cols, total_h)
+    if not cv:
+        raise RuntimeError("caca_create_canvas failed")
+    try:
+        paint_caca_frame(lib, cv, engine, frame, fps, renderer_name="living/caca(export)")
+        return export_canvas_png(lib, cv, path)
+    finally:
+        lib.caca_free_canvas(cv)
+
+
 class AnsiRenderer:
     name = "ansi"
 
@@ -194,21 +307,15 @@ class CacaRenderer:
         self._h = 24
         try:
             lib = ctypes.CDLL("libcaca.so.0")
-            lib.caca_create_canvas.restype = ctypes.c_void_p
+            _bind_caca(lib)
             lib.caca_create_display_with_driver.restype = ctypes.c_void_p
             lib.caca_create_display_with_driver.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
             lib.caca_create_display.restype = ctypes.c_void_p
             lib.caca_create_display.argtypes = [ctypes.c_void_p]
-            lib.caca_put_char.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_uint32]
-            lib.caca_put_str.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_char_p]
-            lib.caca_set_color_ansi.argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8]
             lib.caca_refresh_display.argtypes = [ctypes.c_void_p]
-            lib.caca_get_canvas_width.restype = ctypes.c_int
-            lib.caca_get_canvas_width.argtypes = [ctypes.c_void_p]
-            lib.caca_get_canvas_height.restype = ctypes.c_int
-            lib.caca_get_canvas_height.argtypes = [ctypes.c_void_p]
             lib.caca_get_canvas.restype = ctypes.c_void_p
             lib.caca_get_canvas.argtypes = [ctypes.c_void_p]
+            lib.caca_free_display.argtypes = [ctypes.c_void_p]
             self._lib = lib
         except OSError as e:
             self._fallback = AnsiRenderer(stream)
@@ -287,35 +394,17 @@ class CacaRenderer:
         if self._fallback:
             self._fallback.draw(engine, frame, fps)
             return
-        lib = self._lib
-        w = lib.caca_get_canvas_width(self._cv)
-        h = lib.caca_get_canvas_height(self._cv)
-        grid_h = max(8, h - TOP_HUD - BOTTOM_HUD)
-        grid = activity_grid(engine, frame, w, grid_h)
-        chars = " `'.,:;irsXZA2HG#9&@"
-
-        # Top HUD (above images)
-        lib.caca_set_color_ansi(self._cv, 0x0F, 0x00)
         rname = f"living/caca({self.env_info.get('CACA_DRIVER', '?')})"
-        for i, ln in enumerate(top_hud_lines(engine, frame, fps, rname)):
-            # clear remnant glyphs on short updates
-            padded = (ln[:w] + " " * w)[:w]
-            lib.caca_put_str(self._cv, 0, i, padded.encode())
+        paint_caca_frame(self._lib, self._cv, engine, frame, fps, renderer_name=rname)
+        self._lib.caca_refresh_display(self._dp)
 
-        for y in range(grid_h):
-            for x in range(w):
-                v = float(grid[y, x])
-                ch = ord(chars[min(len(chars) - 1, int(v * (len(chars) - 1) + 1e-6))])
-                pair = _caca_ansi_pair(v)
-                fg, bg = pair & 0x0F, (pair >> 4) & 0x0F
-                lib.caca_set_color_ansi(self._cv, fg, bg)
-                lib.caca_put_char(self._cv, x, TOP_HUD + y, ch)
-
-        lib.caca_set_color_ansi(self._cv, 0x0F, 0x00)
-        y0 = TOP_HUD + grid_h
-        lib.caca_put_str(self._cv, 0, y0, (keys_line()[:w] + " " * w)[:w].encode())
-        lib.caca_put_str(self._cv, 0, y0 + 1, (disclaimer_line()[:w] + " " * w)[:w].encode())
-        lib.caca_refresh_display(self._dp)
+    def save_screenshot(self, path: Path, engine: LivingEngine, frame: FrameState, fps: float) -> Path:
+        """Export current (or freshly painted) libcaca canvas to PNG on black."""
+        if self._fallback or not self._cv:
+            return save_living_screenshot(engine, frame, path, fps=fps)
+        rname = f"living/caca({self.env_info.get('CACA_DRIVER', '?')})"
+        paint_caca_frame(self._lib, self._cv, engine, frame, fps, renderer_name=rname)
+        return export_canvas_png(self._lib, self._cv, path)
 
 
 def make_renderer(name: str) -> AnsiRenderer | CacaRenderer:
