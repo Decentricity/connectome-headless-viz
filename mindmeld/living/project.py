@@ -68,10 +68,12 @@ def project_orbit_framed(
     center: np.ndarray | None = None,
     uv_lo: np.ndarray | None = None,
     uv_hi: np.ndarray | None = None,
+    pad_frac: float = 0.04,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Orbit project with optional shared normalization frame.
 
-    Returns (uv, depth, uv_lo, uv_hi). When lo/hi omitted, derived from xyz.
+    Returns (uv, depth, uv_lo, uv_hi) where lo/hi are the *unpadded* bounds used
+    for the frame (so callers can reuse them exactly for wires + points).
     """
     rot = rotate_yaw_pitch(xyz, yaw, pitch, center=center)
     uv_raw = rot[:, :2]
@@ -79,35 +81,43 @@ def project_orbit_framed(
         uv_lo = uv_raw.min(axis=0)
         uv_hi = uv_raw.max(axis=0)
     span = np.maximum(uv_hi - uv_lo, 1e-6)
-    # slight padding so grid/box edges stay visible
-    pad = 0.06 * span
+    pad = float(pad_frac) * span
     lo = uv_lo - pad
     hi = uv_hi + pad
     span2 = np.maximum(hi - lo, 1e-6)
     uv = ((uv_raw - lo) / span2).astype(np.float32)
-    return uv, rot[:, 2].astype(np.float32), uv_lo.astype(np.float32), uv_hi.astype(np.float32)
+    return uv, rot[:, 2].astype(np.float32), np.asarray(uv_lo, dtype=np.float32), np.asarray(uv_hi, dtype=np.float32)
 
 
-def unit_cube_wire_segments(div: int = 6) -> np.ndarray:
-    """3D grid on the unit cube [0,1]^3: cube edges + face lattice. Shape [S,2,3]."""
-    div = max(2, int(div))
-    segs: list[tuple[tuple[float, float, float], tuple[float, float, float]]] = []
+def aabb_wire_segments(
+    lo: np.ndarray,
+    hi: np.ndarray,
+    div: int = 4,
+    *,
+    face_lattice: bool = True,
+) -> np.ndarray:
+    """3D grid on the axis-aligned box [lo, hi]. Shape [S,2,3]."""
+    lo = np.asarray(lo, dtype=np.float32).reshape(3)
+    hi = np.asarray(hi, dtype=np.float32).reshape(3)
+    div = max(1, int(div))
+    segs: list[tuple[np.ndarray, np.ndarray]] = []
 
     def add(a, b):
-        segs.append((a, b))
+        segs.append((np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32)))
 
-    # Outer cube edges
+    x0, y0, z0 = float(lo[0]), float(lo[1]), float(lo[2])
+    x1, y1, z1 = float(hi[0]), float(hi[1]), float(hi[2])
     corners = [
-        (0, 0, 0),
-        (1, 0, 0),
-        (1, 1, 0),
-        (0, 1, 0),
-        (0, 0, 1),
-        (1, 0, 1),
-        (1, 1, 1),
-        (0, 1, 1),
+        (x0, y0, z0),
+        (x1, y0, z0),
+        (x1, y1, z0),
+        (x0, y1, z0),
+        (x0, y0, z1),
+        (x1, y0, z1),
+        (x1, y1, z1),
+        (x0, y1, z1),
     ]
-    edges = [
+    for i, j in (
         (0, 1),
         (1, 2),
         (2, 3),
@@ -120,29 +130,61 @@ def unit_cube_wire_segments(div: int = 6) -> np.ndarray:
         (1, 5),
         (2, 6),
         (3, 7),
-    ]
-    for i, j in edges:
+    ):
         add(corners[i], corners[j])
 
-    # Face grids (skip edges already drawn)
-    for i in range(1, div):
-        t = i / div
-        # bottom z=0 and top z=1
-        add((t, 0, 0), (t, 1, 0))
-        add((0, t, 0), (1, t, 0))
-        add((t, 0, 1), (t, 1, 1))
-        add((0, t, 1), (1, t, 1))
-        # sides
-        add((t, 0, 0), (t, 0, 1))
-        add((t, 1, 0), (t, 1, 1))
-        add((0, t, 0), (0, t, 1))
-        add((1, t, 0), (1, t, 1))
-        add((0, 0, t), (1, 0, t))
-        add((0, 1, t), (1, 1, t))
-        add((0, 0, t), (0, 1, t))
-        add((1, 0, t), (1, 1, t))
+    if face_lattice and div >= 2:
+        for i in range(1, div):
+            tx = x0 + (x1 - x0) * (i / div)
+            ty = y0 + (y1 - y0) * (i / div)
+            tz = z0 + (z1 - z0) * (i / div)
+            # bottom / top
+            add((tx, y0, z0), (tx, y1, z0))
+            add((x0, ty, z0), (x1, ty, z0))
+            add((tx, y0, z1), (tx, y1, z1))
+            add((x0, ty, z1), (x1, ty, z1))
+            # verticals on sides
+            add((tx, y0, z0), (tx, y0, z1))
+            add((tx, y1, z0), (tx, y1, z1))
+            add((x0, ty, z0), (x0, ty, z1))
+            add((x1, ty, z0), (x1, ty, z1))
+            # constant-z rings on front/back
+            add((x0, y0, tz), (x1, y0, tz))
+            add((x0, y1, tz), (x1, y1, tz))
+            add((x0, y0, tz), (x0, y1, tz))
+            add((x1, y0, tz), (x1, y1, tz))
 
-    return np.asarray(segs, dtype=np.float32)
+    return np.stack(segs, axis=0).astype(np.float32)
+
+
+def unit_cube_wire_segments(div: int = 6) -> np.ndarray:
+    """Deprecated alias — unit cube; prefer aabb_wire_segments on neuron bounds."""
+    return aabb_wire_segments(np.zeros(3, np.float32), np.ones(3, np.float32), div=div)
+
+
+def orbit_frame_for_cloud(
+    xyz: np.ndarray, yaw: float, pitch: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Shared orbit frame from neuron AABB box + points (aligned wires).
+
+    Returns (center, uv_lo, uv_hi, segments) where segments are AABB cage+lattice
+    in the same world space as xyz.
+    """
+    center = xyz.mean(axis=0).astype(np.float32)
+    lo = xyz.min(axis=0).astype(np.float32)
+    hi = xyz.max(axis=0).astype(np.float32)
+    # Expand 2% so the cage sits just outside the cloud
+    span = np.maximum(hi - lo, 1e-6)
+    lo = lo - 0.02 * span
+    hi = hi + 0.02 * span
+    segs = aabb_wire_segments(lo, hi, div=4, face_lattice=True)
+    # Frame from neurons + all wire endpoints so box edges aren't warped
+    ends = segs.reshape(-1, 3)
+    pts = np.concatenate([xyz, ends], axis=0)
+    rot = rotate_yaw_pitch(pts, yaw, pitch, center=center)
+    uv_lo = rot[:, :2].min(axis=0).astype(np.float32)
+    uv_hi = rot[:, :2].max(axis=0).astype(np.float32)
+    return center, uv_lo, uv_hi, segs
 
 
 def project_wire_segments(
@@ -153,12 +195,15 @@ def project_wire_segments(
     center: np.ndarray,
     uv_lo: np.ndarray,
     uv_hi: np.ndarray,
+    pad_frac: float = 0.04,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Project 3D wire segments into shared orbit UV frame. Returns list of (uv_a, uv_b)."""
     out = []
     for a, b in segments:
         pts = np.stack([a, b], axis=0)
-        uv, _, _, _ = project_orbit_framed(pts, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi)
+        uv, _, _, _ = project_orbit_framed(
+            pts, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi, pad_frac=pad_frac
+        )
         out.append((uv[0], uv[1]))
     return out
 

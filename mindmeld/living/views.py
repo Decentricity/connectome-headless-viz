@@ -9,11 +9,11 @@ from .engine import FrameState, LivingEngine
 from .project import (
     activity_amp,
     commit_trail,
+    orbit_frame_for_cloud,
     project_orbit_framed,
     project_plane,
     project_wire_segments,
     triad_panels,
-    unit_cube_wire_segments,
     viz_xyz,
 )
 
@@ -86,16 +86,20 @@ def _draw_orbit_panel(
 ) -> None:
     yaw = float(engine.yaw)
     pitch = float(engine.pitch)
-    center = xyz.mean(axis=0)
-    uv, depth, uv_lo, uv_hi = project_orbit_framed(xyz, yaw, pitch, center=center)
-    # 3D reference grid behind activity
-    segs = unit_cube_wire_segments(div=5)
-    for ua, ub in project_wire_segments(segs, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi):
-        xa = int(np.clip(ua[0] * (pw - 1), 0, pw - 1)) + x0
-        ya = int(np.clip(ua[1] * (ph - 1), 0, ph - 1)) + y0
-        xb = int(np.clip(ub[0] * (pw - 1), 0, pw - 1)) + x0
-        yb = int(np.clip(ub[1] * (ph - 1), 0, ph - 1)) + y0
-        _draw_line(grid, xa, ya, xb, yb, 0.20)
+    center, uv_lo, uv_hi, segs = orbit_frame_for_cloud(xyz, yaw, pitch)
+    # Caca is low-res: cage edges only (first 12), skip dense face lattice noise
+    cage = segs[:12]
+    for ua, ub in project_wire_segments(
+        cage, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi, pad_frac=0.04
+    ):
+        xa = int(round(float(np.clip(ua[0], 0, 1) * (pw - 1)))) + x0
+        ya = int(round(float(np.clip(ua[1], 0, 1) * (ph - 1)))) + y0
+        xb = int(round(float(np.clip(ub[0], 0, 1) * (pw - 1)))) + x0
+        yb = int(round(float(np.clip(ub[1], 0, 1) * (ph - 1)))) + y0
+        _draw_line(grid, xa, ya, xb, yb, 0.32)
+    uv, depth, _, _ = project_orbit_framed(
+        xyz, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi, pad_frac=0.04
+    )
     _raster_into(grid, uv, amp, engine, frame, x0, y0, pw, ph, depth=depth)
 
 

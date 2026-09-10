@@ -104,26 +104,26 @@ class CinemaRenderer:
             grid = np.clip(0.72 * grid + 0.28 * glow, 0, 1)
         body = _colorize(grid)
 
-        # Extra crisp cyberpunk wireframe on orbit (and triad ORB uses float grid already)
+        # Extra crisp cyberpunk wireframe on orbit (AABB-aligned with neurons)
         if getattr(engine, "camera", "triad") == "orbit" and engine.viz.get("n", 0) > 0:
+            from .project import orbit_frame_for_cloud, project_wire_segments
+
             xyz = viz_xyz(engine)
             yaw, pitch = float(engine.yaw), float(engine.pitch)
-            center = xyz.mean(axis=0)
-            _, _, uv_lo, uv_hi = project_orbit_framed(xyz, yaw, pitch, center=center)
+            center, uv_lo, uv_hi, segs = orbit_frame_for_cloud(xyz, yaw, pitch)
             body_img = Image.fromarray(body, mode="RGB")
             draw_b = ImageDraw.Draw(body_img)
             for i, (ua, ub) in enumerate(
                 project_wire_segments(
-                    unit_cube_wire_segments(5), yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi
+                    segs, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi, pad_frac=0.04
                 )
             ):
-                # first 12 segs are cube edges → brighter magenta; rest dim green
                 col = (255, 60, 220) if i < 12 else (40, 220, 120)
-                xa = int(np.clip(ua[0] * (gw - 1), 0, gw - 1))
-                ya = int(np.clip(ua[1] * (gh - 1), 0, gh - 1))
-                xb = int(np.clip(ub[0] * (gw - 1), 0, gw - 1))
-                yb = int(np.clip(ub[1] * (gh - 1), 0, gh - 1))
-                draw_b.line([(xa, ya), (xb, yb)], fill=col, width=1)
+                xa = int(round(float(np.clip(ua[0], 0, 1) * (gw - 1))))
+                ya = int(round(float(np.clip(ua[1], 0, 1) * (gh - 1))))
+                xb = int(round(float(np.clip(ub[0], 0, 1) * (gw - 1))))
+                yb = int(round(float(np.clip(ub[1], 0, 1) * (gh - 1))))
+                draw_b.line([(xa, ya), (xb, yb)], fill=col, width=1 if i >= 12 else 2)
             body = np.asarray(body_img, dtype=np.uint8)
 
         canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)  # pure black
