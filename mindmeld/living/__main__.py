@@ -12,7 +12,9 @@ from pathlib import Path
 import numpy as np
 
 from ..download import ROOT
+from .cinema import make_cinema_from_args
 from .engine import FrameState, LivingEngine
+from .project import commit_trail
 from .record import Recorder, load_recording
 from .render import connectome_banner, make_renderer
 from .voice import announce, announce_camera, announce_stim, announce_view
@@ -34,6 +36,12 @@ def _parse_args(argv=None):
         action="store_true",
         help="Disable say-alert toggle announcements (non-GPU RHVoice)",
     )
+    p.add_argument("--no-cinema", action="store_true", help="Record NPZ only (disable default MP4 cinema)")
+    p.add_argument("--cinema-mp4", type=Path, default=None, help="Override cinema MP4 output path")
+    p.add_argument("--cinema-dir", type=Path, default=None, help="Override cinema PNG staging directory")
+    p.add_argument("--cinema-size", default="1280x720", help="Cinema resolution WxH (default 1280x720)")
+    p.add_argument("--cinema-every", type=int, default=1, help="Write every Nth frame while recording")
+    p.add_argument("--cinema-keep-pngs", action="store_true", help="Keep staging PNGs after MP4 encode")
     return p.parse_args(argv)
 
 
@@ -60,6 +68,33 @@ class RawTTY:
         if not r:
             return None
         return sys.stdin.read(1)
+
+
+def _start_record(recorder: Recorder, cinema, voice_on: bool) -> None:
+    recorder.start()
+    if cinema is not None:
+        cinema.start()
+    announce("Recording started.", enabled=voice_on)
+
+
+def _stop_record(recorder: Recorder, cinema, engine: LivingEngine, voice_on: bool, meta: dict) -> None:
+    recorder.stop_and_save(
+        engine.viz["xy"],
+        engine.edges,
+        meta,
+        xyz=engine.viz.get("xyz"),
+    )
+    mp4 = None
+    if cinema is not None:
+        mp4 = cinema.stop_and_encode()
+    msg = "Recording saved."
+    if mp4 is not None:
+        msg = f"Recording saved, cinema {mp4.name}."
+        print(f"Saved recording → {recorder.path}", file=sys.stderr)
+        print(f"Saved cinema   → {mp4}", file=sys.stderr)
+    else:
+        print(f"\nSaved recording → {recorder.path}", file=sys.stderr)
+    announce(msg, enabled=voice_on)
 
 
 def run_replay(path: Path, renderer_name: str, fps: float, seconds: float):
@@ -130,8 +165,8 @@ def main(argv=None):
     renderer = make_renderer(args.renderer)
     rec_path = args.record or (ROOT / "recordings" / "living_demo.npz")
     recorder = Recorder(rec_path)
+    cinema = make_cinema_from_args(args)
     auto_record = bool(args.demo or args.record)
-    # Demo auto-cycles would spam speech; mute unless user overrides later.
     voice_on = not args.mute and not args.demo
 
     renderer.begin()
@@ -151,7 +186,7 @@ def main(argv=None):
     try:
         with RawTTY(sys.stdin.fileno()) as tty_in:
             if auto_record:
-                recorder.start()
+                _start_record(recorder, cinema, voice_on=False)
             while True:
                 now = time.time()
                 if args.seconds and (now - t_start) >= args.seconds:
@@ -215,20 +250,22 @@ def main(argv=None):
                     announce("State reset.", enabled=voice_on)
                 elif key == "R":
                     if not recorder.active:
-                        recorder.start()
-                        announce("Recording started.", enabled=voice_on)
+                        _start_record(recorder, cinema, voice_on)
                     else:
-                        recorder.stop_and_save(
-                            engine.viz["xy"],
-                            engine.edges,
+                        _stop_record(
+                            recorder,
+                            cinema,
+                            engine,
+                            voice_on,
                             {"graph": engine.graph, "weighting": engine.weighting},
-                            xyz=engine.viz.get("xyz"),
                         )
-                        announce("Recording saved.", enabled=voice_on)
 
                 loop_t0 = time.time()
                 frame = engine.tick()
-                renderer.draw(engine, frame, fps_ema)
+                if cinema is not None and cinema.active:
+                    cinema.push(engine, frame, fps_ema)
+                renderer.draw(engine, frame, fps_ema, commit=False)
+                commit_trail(engine, frame)
                 if recorder.active:
                     recorder.push(frame.activity, {"step": frame.step, "view": frame.view, "mode": frame.mode})
                 dt = time.time() - loop_t0
@@ -240,13 +277,13 @@ def main(argv=None):
                     time.sleep(sleep)
     finally:
         if recorder.active and recorder.frames:
-            recorder.stop_and_save(
-                engine.viz["xy"],
-                engine.edges,
-                {"graph": args.graph, "weighting": args.weighting},
-                xyz=engine.viz.get("xyz"),
+            _stop_record(
+                recorder,
+                cinema,
+                engine,
+                voice_on=False,
+                meta={"graph": args.graph, "weighting": args.weighting},
             )
-            print(f"\nSaved recording → {recorder.path}", file=sys.stderr)
         renderer.end()
         if fps_samples:
             arr = np.asarray(fps_samples, dtype=np.float64)

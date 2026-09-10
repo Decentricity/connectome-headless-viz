@@ -1,4 +1,3 @@
-
 data/processed/
 data/raw/
 data/tmp/
@@ -9,5 +8,7 @@ data/tmp/
 __pycache__/
 .pytest_cache/
 recordings/*.npz
+recordings/*.mp4
+recordings/cinema_frames_*/
 reports/*.png
 .venv/

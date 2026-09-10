@@ -48,4 +48,6 @@ Camera: **Tab** toggles `triad` (XY|XZ|YZ + orbit peek) ↔ `orbit` (single rota
 
 Toggle announcements use `/home/decentricity/bin/say-alert` (RHVoice / speech-dispatcher — **not** Piper / GPU). Pass `--mute` to silence; `--demo` is muted by default.
 
+**R** records activity NPZ **and** headless GPU cinema MP4 by default (`recordings/living_cinema_<timestamp>.mp4`). Opt out with `--no-cinema`. Overrides: `--cinema-mp4`, `--cinema-size 1280x720`, `--cinema-every N`.
+
 Phase II swarm / EEG Phase 2: do not start unless asked.

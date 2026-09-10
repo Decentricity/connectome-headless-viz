@@ -17,9 +17,9 @@ from .stim import Stimulator
 from .views import activity_grid
 
 BLOCKS = " ·░▒▓█"
+CACA_CHARS = " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"
 TOP_HUD = 3  # connectome + stim + status (drawn above the image)
 BOTTOM_HUD = 2  # keys + disclaimer
-CACA_CHARS = " `'.,:;irsXZA2HG#9&@"
 
 
 def _color256(v: float) -> int:
@@ -111,15 +111,15 @@ def status_banner(engine: LivingEngine, frame: FrameState, fps: float, renderer_
 
 def keys_line() -> str:
     return (
-        "keys: [tab]cam  [,/./j/k]orbit  [space]pause  [n]stim-mode  [v]view  "
-        "[[/]]intensity  [+/-]speed  [i]impulse  [r]reset  [R]record  [q]quit"
+        "keys: [tab]cam  [,/./j/k]orbit  [space]pause  [n]stim  [v]view  "
+        "[[/]]intens  [+/-]speed  [i]impulse  [r]reset  [R]record=NPZ+MP4  [q]quit"
     )
 
 
 def disclaimer_line() -> str:
     return (
-        "assumed sparse reservoir dynamics — not biophysically faithful | "
-        "toggles spoken via say-alert (non-GPU); press n to cycle stim"
+        "assumed sparse reservoir dynamics — not biophysics | "
+        "R records NPZ+cinema MP4 by default (--no-cinema to opt out)"
     )
 
 
@@ -159,6 +159,8 @@ def paint_caca_frame(
     frame: FrameState,
     fps: float,
     renderer_name: str = "living/caca",
+    *,
+    commit: bool = True,
 ) -> None:
     """Paint one living frame onto an existing libcaca canvas (black background)."""
     w = lib.caca_get_canvas_width(cv)
@@ -168,7 +170,7 @@ def paint_caca_frame(
     lib.caca_set_color_ansi(cv, 0x00, 0x00)
     lib.caca_clear_canvas(cv)
 
-    grid = activity_grid(engine, frame, w, grid_h)
+    grid = activity_grid(engine, frame, w, grid_h, commit=commit)
 
     lib.caca_set_color_ansi(cv, 0x0F, 0x00)  # bright white on black HUD
     for i, ln in enumerate(top_hud_lines(engine, frame, fps, renderer_name)):
@@ -181,7 +183,7 @@ def paint_caca_frame(
             ch = ord(CACA_CHARS[min(len(CACA_CHARS) - 1, int(v * (len(CACA_CHARS) - 1) + 1e-6))])
             pair = _caca_ansi_pair(v)
             fg, bg = pair & 0x0F, (pair >> 4) & 0x0F  # bg nibble is 0 → black
-            if v <= 0.02:
+            if v <= 0.015:
                 fg, bg = 0x00, 0x00  # empty cells stay pure black
             lib.caca_set_color_ansi(cv, fg, bg)
             lib.caca_put_char(cv, x, TOP_HUD + y, ch)
@@ -235,7 +237,7 @@ def save_living_screenshot(
     if not cv:
         raise RuntimeError("caca_create_canvas failed")
     try:
-        paint_caca_frame(lib, cv, engine, frame, fps, renderer_name="living/caca(export)")
+        paint_caca_frame(lib, cv, engine, frame, fps, renderer_name="living/caca(export)", commit=False)
         return export_canvas_png(lib, cv, path)
     finally:
         lib.caca_free_canvas(cv)
@@ -268,9 +270,9 @@ class AnsiRenderer:
             self.stream.write("\033[?25h\033[0m\n")
             self.stream.flush()
 
-    def draw(self, engine: LivingEngine, frame: FrameState, fps: float):
+    def draw(self, engine: LivingEngine, frame: FrameState, fps: float, *, commit: bool = True):
         cols, rows = self.size()
-        grid = activity_grid(engine, frame, cols, rows)
+        grid = activity_grid(engine, frame, cols, rows, commit=commit)
         self.stream.write("\033[H")
         lines = [ln[:cols] for ln in top_hud_lines(engine, frame, fps, f"living/{self.name}")]
         for y in range(rows):
@@ -390,12 +392,14 @@ class CacaRenderer:
         # canvas owned by display when created with it; free_display handles it
         self._cv = None
 
-    def draw(self, engine: LivingEngine, frame: FrameState, fps: float):
+    def draw(self, engine: LivingEngine, frame: FrameState, fps: float, *, commit: bool = True):
         if self._fallback:
-            self._fallback.draw(engine, frame, fps)
+            self._fallback.draw(engine, frame, fps, commit=commit)
             return
         rname = f"living/caca({self.env_info.get('CACA_DRIVER', '?')})"
-        paint_caca_frame(self._lib, self._cv, engine, frame, fps, renderer_name=rname)
+        paint_caca_frame(
+            self._lib, self._cv, engine, frame, fps, renderer_name=rname, commit=commit
+        )
         self._lib.caca_refresh_display(self._dp)
 
     def save_screenshot(self, path: Path, engine: LivingEngine, frame: FrameState, fps: float) -> Path:
@@ -403,7 +407,7 @@ class CacaRenderer:
         if self._fallback or not self._cv:
             return save_living_screenshot(engine, frame, path, fps=fps)
         rname = f"living/caca({self.env_info.get('CACA_DRIVER', '?')})"
-        paint_caca_frame(self._lib, self._cv, engine, frame, fps, renderer_name=rname)
+        paint_caca_frame(self._lib, self._cv, engine, frame, fps, renderer_name=rname, commit=False)
         return export_canvas_png(self._lib, self._cv, path)
 
 
