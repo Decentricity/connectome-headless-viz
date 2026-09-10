@@ -87,10 +87,9 @@ def _draw_orbit_panel(
     yaw = float(engine.yaw)
     pitch = float(engine.pitch)
     center, uv_lo, uv_hi, segs = orbit_frame_for_cloud(xyz, yaw, pitch)
-    # Caca is low-res: cage edges only (first 12), skip dense face lattice noise
-    cage = segs[:12]
+    # Outer bounding box only (12 edges)
     for ua, ub in project_wire_segments(
-        cage, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi, pad_frac=0.04
+        segs, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi, pad_frac=0.04
     ):
         xa = int(round(float(np.clip(ua[0], 0, 1) * (pw - 1)))) + x0
         ya = int(round(float(np.clip(ua[1], 0, 1) * (ph - 1)))) + y0

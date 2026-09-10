@@ -167,8 +167,7 @@ def orbit_frame_for_cloud(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Shared orbit frame from neuron AABB box + points (aligned wires).
 
-    Returns (center, uv_lo, uv_hi, segments) where segments are AABB cage+lattice
-    in the same world space as xyz.
+    Returns (center, uv_lo, uv_hi, segments) — outer bounding-box edges only.
     """
     center = xyz.mean(axis=0).astype(np.float32)
     lo = xyz.min(axis=0).astype(np.float32)
@@ -177,7 +176,7 @@ def orbit_frame_for_cloud(
     span = np.maximum(hi - lo, 1e-6)
     lo = lo - 0.02 * span
     hi = hi + 0.02 * span
-    segs = aabb_wire_segments(lo, hi, div=4, face_lattice=True)
+    segs = aabb_wire_segments(lo, hi, div=1, face_lattice=False)
     # Frame from neurons + all wire endpoints so box edges aren't warped
     ends = segs.reshape(-1, 3)
     pts = np.concatenate([xyz, ends], axis=0)
