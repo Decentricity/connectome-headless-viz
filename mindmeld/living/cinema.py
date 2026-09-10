@@ -23,20 +23,32 @@ def _parse_size(spec: str) -> tuple[int, int]:
 
 
 def _colorize(grid: np.ndarray) -> np.ndarray:
-    """Map [0,1] activity → RGB uint8 on pure black (cyan→amber ramp)."""
+    """Map [0,1] activity → high-contrast cyberpunk RGB on pure black."""
     g = np.clip(grid, 0, 1).astype(np.float32)
+    # stops: black → neon green → hot pink → yellow → red → white
+    stops_t = np.array([0.0, 0.10, 0.28, 0.50, 0.72, 1.0], dtype=np.float32)
+    stops_c = np.array(
+        [
+            [0, 0, 0],
+            [0, 255, 110],
+            [255, 45, 200],
+            [255, 235, 50],
+            [255, 55, 70],
+            [255, 255, 255],
+        ],
+        dtype=np.float32,
+    )
     rgb = np.zeros(g.shape + (3,), dtype=np.float32)
-    # low: deep blue/cyan, mid: teal, high: warm amber
-    rgb[..., 0] = np.clip(1.6 * (g - 0.45), 0, 1) * 0.95 + np.clip(g * 0.15, 0, 1)
-    rgb[..., 1] = np.clip(g * 1.35, 0, 1) * 0.85
-    rgb[..., 2] = np.clip(1.1 * g, 0, 1) * (1.0 - 0.55 * np.clip((g - 0.5) * 2, 0, 1))
-    # soft bloom from blurred copy
+    for c in range(3):
+        rgb[..., c] = np.interp(g, stops_t, stops_c[:, c])
+    # lift midtones so dark blues never dominate; boost bloom in pink/yellow
     bloom = _blur2d(g, 1)
-    rgb[..., 0] = np.clip(rgb[..., 0] + 0.35 * bloom * bloom, 0, 1)
-    rgb[..., 1] = np.clip(rgb[..., 1] + 0.25 * bloom, 0, 1)
-    rgb[..., 2] = np.clip(rgb[..., 2] + 0.40 * bloom * (1 - g), 0, 1)
-    rgb *= (g > 0.02)[..., None]
-    return (rgb * 255.0).astype(np.uint8)
+    rgb[..., 0] = np.clip(rgb[..., 0] + 40.0 * bloom * bloom, 0, 255)
+    rgb[..., 1] = np.clip(rgb[..., 1] + 25.0 * bloom, 0, 255)
+    rgb[..., 2] = np.clip(rgb[..., 2] + 35.0 * bloom * (1.0 - g), 0, 255)
+    # hard black for empty cells (keep faint grid ~0.20 visible as green/pink)
+    rgb *= (g > 0.04)[..., None]
+    return rgb.astype(np.uint8)
 
 
 def _blur2d(g: np.ndarray, r: int) -> np.ndarray:
@@ -70,12 +82,18 @@ class CinemaRenderer:
         return self.width, max(64, self.height - self.top - self.bottom)
 
     def draw(self, engine: LivingEngine, frame: FrameState, fps: float, *, commit: bool = False) -> np.ndarray:
+        from .project import (
+            project_orbit_framed,
+            project_wire_segments,
+            unit_cube_wire_segments,
+            viz_xyz,
+        )
+
         gw, gh = self.grid_size
         grid = activity_grid(engine, frame, gw, gh, commit=commit)
         # optional light GPU path: blur on device when available
         if self.device.type == "cuda":
             t = torch.as_tensor(grid, device=self.device)
-            # 3x3 box via avg_pool (pad)
             t4 = t[None, None]
             t4 = torch.nn.functional.avg_pool2d(
                 torch.nn.functional.pad(t4, (1, 1, 1, 1), mode="replicate"),
@@ -85,6 +103,29 @@ class CinemaRenderer:
             glow = t4[0, 0].detach().float().cpu().numpy()
             grid = np.clip(0.72 * grid + 0.28 * glow, 0, 1)
         body = _colorize(grid)
+
+        # Extra crisp cyberpunk wireframe on orbit (and triad ORB uses float grid already)
+        if getattr(engine, "camera", "triad") == "orbit" and engine.viz.get("n", 0) > 0:
+            xyz = viz_xyz(engine)
+            yaw, pitch = float(engine.yaw), float(engine.pitch)
+            center = xyz.mean(axis=0)
+            _, _, uv_lo, uv_hi = project_orbit_framed(xyz, yaw, pitch, center=center)
+            body_img = Image.fromarray(body, mode="RGB")
+            draw_b = ImageDraw.Draw(body_img)
+            for i, (ua, ub) in enumerate(
+                project_wire_segments(
+                    unit_cube_wire_segments(5), yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi
+                )
+            ):
+                # first 12 segs are cube edges → brighter magenta; rest dim green
+                col = (255, 60, 220) if i < 12 else (40, 220, 120)
+                xa = int(np.clip(ua[0] * (gw - 1), 0, gw - 1))
+                ya = int(np.clip(ua[1] * (gh - 1), 0, gh - 1))
+                xb = int(np.clip(ub[0] * (gw - 1), 0, gw - 1))
+                yb = int(np.clip(ub[1] * (gh - 1), 0, gh - 1))
+                draw_b.line([(xa, ya), (xb, yb)], fill=col, width=1)
+            body = np.asarray(body_img, dtype=np.uint8)
+
         canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)  # pure black
         y0 = self.top
         canvas[y0 : y0 + gh, :gw] = body[:gh, :gw]
@@ -98,15 +139,15 @@ class CinemaRenderer:
         ]
         y = 4
         for ln in lines:
-            draw.text((8, y), ln, fill=(230, 235, 240), font=self._font)
+            draw.text((8, y), ln, fill=(255, 120, 220), font=self._font)  # hot pink HUD
             y += 16
-        foot = "R record = NPZ+MP4 | tab cam | n stim | assumed reservoir dynamics"
-        draw.text((8, self.height - 28), foot[:180], fill=(160, 170, 180), font=self._font)
+        foot = "R record = NPZ+MP4 | tab cam | n stim | cyberpunk cinema / assumed reservoir"
+        draw.text((8, self.height - 28), foot[:180], fill=(80, 255, 160), font=self._font)
         cam = getattr(engine, "camera", "triad")
         draw.text(
             (8, self.height - 14),
             f"cam={cam} view={frame.view} step={frame.step}",
-            fill=(120, 140, 160),
+            fill=(255, 230, 80),
             font=self._font,
         )
         self.last_rgb = np.asarray(img, dtype=np.uint8)

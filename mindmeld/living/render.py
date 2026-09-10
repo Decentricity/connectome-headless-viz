@@ -23,30 +23,32 @@ BOTTOM_HUD = 2  # keys + disclaimer
 
 
 def _color256(v: float) -> int:
+    """Cyberpunk 256-color ramp: green → pink → yellow → red → white."""
     v = float(np.clip(v, 0, 1))
-    if v < 0.25:
-        t = v / 0.25
-        r, g, b = 0, int(t * 3), 4
-    elif v < 0.5:
-        t = (v - 0.25) / 0.25
-        r, g, b = int(t * 3), 4, 4 - int(t * 2)
-    elif v < 0.75:
-        t = (v - 0.5) / 0.25
-        r, g, b = 4, 4 - int(t * 2), int(t * 4)
+    if v < 0.2:
+        t = v / 0.2
+        r, g, b = 0, int(3 + 2 * t), int(1 + t)  # neon green
+    elif v < 0.45:
+        t = (v - 0.2) / 0.25
+        r, g, b = int(3 + 2 * t), int(2 * (1 - t)), int(3 + 2 * t)  # hot pink/magenta
+    elif v < 0.7:
+        t = (v - 0.45) / 0.25
+        r, g, b = 5, int(4 + t), int(2 * (1 - t))  # yellow
     else:
-        t = (v - 0.75) / 0.25
-        r, g, b = 5, 4 + int(t), int(5 * (1 - t))
+        t = (v - 0.7) / 0.3
+        r, g, b = 5, int(5 * (1 - 0.4 * t)), int(5 * t)  # red → white-ish
     return 16 + 36 * min(5, max(0, r)) + 6 * min(5, max(0, g)) + min(5, max(0, b))
 
 
-# libcaca ANSI color pairs (fg nibble)
+# libcaca ANSI: green / magenta / yellow / red / white (no dark blue)
 _CACA_COLORS = (
     0x00,  # black
-    0x04,  # blue-ish via ANSI blue
-    0x06,  # cyan
+    0x02,  # green
     0x05,  # magenta
     0x03,  # yellow/brown
-    0x07,  # light gray / white-ish
+    0x01,  # red
+    0x07,  # white
+    0x0F,  # bright white
 )
 
 

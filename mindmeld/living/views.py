@@ -9,9 +9,11 @@ from .engine import FrameState, LivingEngine
 from .project import (
     activity_amp,
     commit_trail,
-    project_orbit,
+    project_orbit_framed,
     project_plane,
+    project_wire_segments,
     triad_panels,
+    unit_cube_wire_segments,
     viz_xyz,
 )
 
@@ -46,8 +48,7 @@ def _triad_grid(engine: LivingEngine, frame: FrameState, amp: np.ndarray, width:
         if panel.w < 8 or panel.h < 4:
             continue
         if panel.kind == "orbit":
-            uv, depth = project_orbit(xyz, float(engine.yaw), float(engine.pitch))
-            _raster_into(grid, uv, amp, engine, frame, panel.x0, panel.y0, panel.w, panel.h, depth=depth)
+            _draw_orbit_panel(grid, engine, frame, amp, xyz, panel.x0, panel.y0, panel.w, panel.h)
         else:
             uv = project_plane(xyz, panel.kind)
             _raster_into(grid, uv, amp, engine, frame, panel.x0, panel.y0, panel.w, panel.h)
@@ -65,12 +66,37 @@ def _triad_grid(engine: LivingEngine, frame: FrameState, amp: np.ndarray, width:
 def _orbit_grid(engine: LivingEngine, frame: FrameState, amp: np.ndarray, width: int, height: int) -> np.ndarray:
     grid = np.zeros((height, width), dtype=np.float32)
     xyz = viz_xyz(engine)
-    uv, depth = project_orbit(xyz, float(engine.yaw), float(engine.pitch))
-    _raster_into(grid, uv, amp, engine, frame, 0, 0, width, height, depth=depth)
+    _draw_orbit_panel(grid, engine, frame, amp, xyz, 0, 0, width, height)
     deg_y = int(round(math.degrees(float(engine.yaw)))) % 360
     deg_p = int(round(math.degrees(float(engine.pitch))))
     _label(grid, 1, 0, f"Y{deg_y} P{deg_p}")
     return grid
+
+
+def _draw_orbit_panel(
+    grid: np.ndarray,
+    engine: LivingEngine,
+    frame: FrameState,
+    amp: np.ndarray,
+    xyz: np.ndarray,
+    x0: int,
+    y0: int,
+    pw: int,
+    ph: int,
+) -> None:
+    yaw = float(engine.yaw)
+    pitch = float(engine.pitch)
+    center = xyz.mean(axis=0)
+    uv, depth, uv_lo, uv_hi = project_orbit_framed(xyz, yaw, pitch, center=center)
+    # 3D reference grid behind activity
+    segs = unit_cube_wire_segments(div=5)
+    for ua, ub in project_wire_segments(segs, yaw, pitch, center=center, uv_lo=uv_lo, uv_hi=uv_hi):
+        xa = int(np.clip(ua[0] * (pw - 1), 0, pw - 1)) + x0
+        ya = int(np.clip(ua[1] * (ph - 1), 0, ph - 1)) + y0
+        xb = int(np.clip(ub[0] * (pw - 1), 0, pw - 1)) + x0
+        yb = int(np.clip(ub[1] * (ph - 1), 0, ph - 1)) + y0
+        _draw_line(grid, xa, ya, xb, yb, 0.20)
+    _raster_into(grid, uv, amp, engine, frame, x0, y0, pw, ph, depth=depth)
 
 
 def _raster_into(
